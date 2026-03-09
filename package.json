@@ -1,0 +1,9 @@
+{
+  "name": "truthlens-frontend",
+  "version": "1.0.0",
+  "description": "TruthLens — AI Fake News Detection Frontend",
+  "scripts": {
+    "dev": "npx -y live-server frontend --port=5173 --no-browser",
+    "start": "npx -y live-server frontend --port=5173"
+  }
+}
