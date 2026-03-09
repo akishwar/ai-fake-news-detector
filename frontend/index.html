@@ -112,6 +112,26 @@
                         rows="10"></textarea>
                     <div class="char-count" id="charCount">0 characters</div>
                 </div>
+
+                <!-- File Upload Area -->
+                <div class="upload-area" id="uploadArea">
+                    <input type="file" id="fileInput" accept=".pdf,.jpg,.jpeg,.png,.webp" hidden />
+                    <div class="upload-content" id="uploadContent">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                            stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                            <polyline points="17 8 12 3 7 8" />
+                            <line x1="12" y1="3" x2="12" y2="15" />
+                        </svg>
+                        <span>Upload PDF or Image</span>
+                        <span class="upload-hint">Drag & drop or click • PDF, JPG, PNG supported</span>
+                    </div>
+                    <div class="upload-progress hidden" id="uploadProgress">
+                        <div class="upload-spinner"></div>
+                        <span>Extracting text...</span>
+                    </div>
+                </div>
+
                 <div class="input-actions">
                     <button class="btn btn-secondary" id="clearBtn">
                         <svg width="16" height="16" viewBox="0 0 16 16" fill="none">

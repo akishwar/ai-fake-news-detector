@@ -1,11 +1,14 @@
-"""NLP analysis pipeline for fake news detection.
+"""NLP analysis pipeline for fake news detection using Google Gemini API.
 
-Enhanced with deep multi-signal analysis to catch well-written AI-generated
-fake news, not just clickbait/sensational content.
+Combines Gemini AI reasoning with deep heuristic analysis for comprehensive
+fake news detection.
 """
 
+import os
 import re
-from transformers import pipeline
+import json
+from dotenv import load_dotenv
+import google.generativeai as genai
 from utils.preprocessor import (
     clean_text,
     compute_clickbait_score,
@@ -20,21 +23,49 @@ from utils.preprocessor import (
     compute_linguistic_features,
 )
 
-# ── Load the pre-trained model once at startup ──────────────────────────────
-print("⏳ Loading fake news classification model...")
-try:
-    classifier = pipeline(
-        "text-classification",
-        model="hamzab/roberta-fake-news-classification",
-        top_k=None,
-    )
-    MODEL_LOADED = True
-    print("✅ Model loaded successfully!")
-except Exception as e:
-    print(f"⚠️  Model loading failed: {e}")
-    print("   Falling back to heuristic-only analysis.")
-    classifier = None
-    MODEL_LOADED = False
+# ── Load environment & configure Gemini ─────────────────────────────────────
+load_dotenv()
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+if GEMINI_API_KEY and GEMINI_API_KEY != "PASTE_YOUR_KEY_HERE":
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel("gemini-2.0-flash")
+    GEMINI_LOADED = True
+    print("✅ Gemini API configured successfully!")
+else:
+    model = None
+    GEMINI_LOADED = False
+    print("⚠️  No Gemini API key found. Using heuristic-only analysis.")
+    print("   Set GEMINI_API_KEY in backend/.env to enable AI analysis.")
+
+
+# ── Gemini Prompt ───────────────────────────────────────────────────────────
+ANALYSIS_PROMPT = """You are an expert fact-checker and media analyst. Analyze the following news article for authenticity and credibility.
+
+Evaluate these specific aspects:
+1. **Source credibility**: Are specific, named, verifiable sources cited? Or does it rely on vague attributions like "reportedly", "sources say", "officials familiar with"?
+2. **Verifiable claims**: Does the article contain specific, falsifiable claims with dates, numbers, and named individuals? Or is it full of vague, unverifiable statements?
+3. **Writing patterns**: Does the text show signs of AI generation (formulaic structure, excessive hedging, overly smooth prose, no direct quotes)?
+4. **Logical consistency**: Are the claims internally consistent and plausible?
+5. **Red flags**: Clickbait language, emotional manipulation, conspiracy theories, lack of attribution?
+
+IMPORTANT: A well-written article that uses phrases like "reportedly", "officials say", "if successful", "may later be expanded" WITHOUT naming specific people or providing direct quotes is LIKELY FABRICATED, even if it sounds professional.
+
+Respond ONLY with a valid JSON object in this exact format (no markdown, no explanation):
+{
+    "credibility_score": <number 0-100, where 100 is fully credible>,
+    "label": "<Likely Real OR Uncertain OR Likely Fake>",
+    "reasoning": "<2-3 sentence explanation of your assessment>",
+    "source_quality": "<high OR medium OR low OR none>",
+    "ai_generated_likelihood": "<high OR medium OR low>",
+    "key_concerns": ["<concern 1>", "<concern 2>"]
+}
+
+Article to analyze:
+\"\"\"
+{article_text}
+\"\"\"
+"""
 
 
 def _get_sentiment(text: str) -> tuple[str, float]:
@@ -80,75 +111,58 @@ def _extract_entities(text: str) -> list[str]:
     return entities[:10]
 
 
-def analyze_text(text: str) -> dict:
+async def _call_gemini(text: str) -> dict | None:
+    """Call Gemini API for AI-powered analysis."""
+    if not GEMINI_LOADED or not model:
+        return None
+
+    try:
+        prompt = ANALYSIS_PROMPT.replace("{article_text}", text[:3000])
+        response = model.generate_content(prompt)
+
+        # Parse JSON from response
+        response_text = response.text.strip()
+        # Remove markdown code fences if present
+        if response_text.startswith("```"):
+            response_text = response_text.split("\n", 1)[-1]
+            response_text = response_text.rsplit("```", 1)[0]
+        response_text = response_text.strip()
+
+        result = json.loads(response_text)
+        return result
+    except Exception as e:
+        print(f"Gemini API error: {e}")
+        return None
+
+
+async def analyze_text(text: str) -> dict:
     """
-    Run the full NLP analysis pipeline on the given text.
-
-    Uses a multi-signal approach:
-    1. ML model prediction (RoBERTa fine-tuned on fake news)
-    2. Vague attribution detection
-    3. Hedging/uncertainty language analysis
-    4. Specificity analysis (quotes, named sources, data, dates)
-    5. AI-generated content pattern detection
-    6. Credibility signal verification
-    7. Traditional heuristics (clickbait, subjectivity, caps, emotional language)
-
-    The final credibility score is a weighted combination of all signals.
+    Run the full analysis pipeline combining Gemini AI with heuristic analysis.
     """
     cleaned = clean_text(text)
 
     # ══════════════════════════════════════════════════════════════════════
-    # SIGNAL 1: ML Model Prediction
+    # SIGNAL 1: Gemini AI Analysis
     # ══════════════════════════════════════════════════════════════════════
-    model_score = 0.5
-    model_confidence = 0.5
+    gemini_result = await _call_gemini(cleaned)
+    gemini_score = None
+    gemini_concerns = []
 
-    if MODEL_LOADED and classifier:
-        try:
-            input_text = cleaned[:2048]
-            result = classifier(input_text)
-            if result and isinstance(result[0], list):
-                scores_dict = {item['label'].lower(): item['score'] for item in result[0]}
-            elif result:
-                scores_dict = {item['label'].lower(): item['score'] for item in result}
-            else:
-                scores_dict = {}
-
-            real_score = scores_dict.get('real', scores_dict.get('true', scores_dict.get('1', 0.5)))
-            fake_score = scores_dict.get('fake', scores_dict.get('false', scores_dict.get('0', 0.5)))
-            model_score = real_score
-            model_confidence = max(real_score, fake_score)
-        except Exception as e:
-            print(f"Prediction error: {e}")
+    if gemini_result:
+        gemini_score = gemini_result.get("credibility_score", 50)
+        gemini_concerns = gemini_result.get("key_concerns", [])
+        gemini_reasoning = gemini_result.get("reasoning", "")
+        gemini_source_quality = gemini_result.get("source_quality", "medium")
+        gemini_ai_likelihood = gemini_result.get("ai_generated_likelihood", "low")
 
     # ══════════════════════════════════════════════════════════════════════
-    # SIGNAL 2: Vague Attribution (CRITICAL for well-written fake news)
+    # SIGNAL 2-7: Heuristic Analysis (same as before)
     # ══════════════════════════════════════════════════════════════════════
     vague_score, vague_matches = compute_vague_attribution_score(text)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SIGNAL 3: Hedging / Uncertainty Language
-    # ══════════════════════════════════════════════════════════════════════
     hedging_score, hedging_count = compute_hedging_score(text)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SIGNAL 4: Specificity (verifiable details)
-    # ══════════════════════════════════════════════════════════════════════
     specificity_score, specificity_details = compute_specificity_score(text)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SIGNAL 5: AI-Generated Content Detection
-    # ══════════════════════════════════════════════════════════════════════
     ai_score, ai_matches = compute_ai_generation_score(text)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SIGNAL 6: Credibility Signals (legitimate journalism markers)
-    # ══════════════════════════════════════════════════════════════════════
     credibility_signal_score, credibility_signals = compute_credibility_signals_score(text)
-
-    # ══════════════════════════════════════════════════════════════════════
-    # SIGNAL 7: Traditional Heuristics
-    # ══════════════════════════════════════════════════════════════════════
     clickbait = compute_clickbait_score(text)
     subjectivity = compute_subjectivity_score(text)
     sentiment_label, sentiment_score = _get_sentiment(text)
@@ -160,68 +174,67 @@ def analyze_text(text: str) -> dict:
     # ══════════════════════════════════════════════════════════════════════
     # COMPOSITE CREDIBILITY SCORE
     # ══════════════════════════════════════════════════════════════════════
-    #
-    # Strategy: Start with model score, then apply penalties & bonuses
-    # from all heuristic signals. Well-written fake articles will get
-    # penalized for vague sourcing, hedging, lack of specificity, and
-    # AI patterns even if the model is fooled.
+    word_count = linguistic.get("word_count", len(text.split()))
 
-    # --- Penalty signals (each reduces credibility) ---
-    # Vague attribution is the #1 indicator for fabricated news
-    vague_penalty = vague_score * 0.25
+    # --- Heuristic penalty calculation ---
+    # Vague attribution: only penalize if article actually uses vague sourcing
+    vague_penalty = vague_score * 0.20
 
-    # Hedging penalty — excessive uncertainty language
-    hedging_penalty = hedging_score * 0.15
+    # Hedging: only penalize if density is notable
+    hedging_penalty = hedging_score * 0.12
 
-    # Lack of specificity penalty — no verifiable details
-    # Inverted: low specificity = high penalty
-    specificity_penalty = (1.0 - specificity_score) * 0.20
+    # Specificity: scale penalty by article length
+    # Short articles (< 100 words) naturally have fewer details — don't punish them
+    length_factor = min(word_count / 150.0, 1.0)  # full penalty only for 150+ word articles
+    specificity_penalty = (1.0 - specificity_score) * 0.12 * length_factor
 
-    # AI generation penalty
-    ai_penalty = ai_score * 0.15
+    # AI generation patterns
+    ai_penalty = ai_score * 0.12
 
-    # Traditional heuristic penalties
+    # Traditional signals
     clickbait_penalty = clickbait * 0.10
     subjectivity_penalty = subjectivity * 0.05
     caps_penalty = min(linguistic.get("caps_ratio", 0) * 3, 1.0) * 0.05
-    red_flag_penalty = min(len(red_flags) / 5.0, 1.0) * 0.10
+
+    # Red flags: only from genuine red flags, not all warnings
+    genuine_flags = [f for f in red_flags if not f.startswith("🤖")]
+    red_flag_penalty = min(len(genuine_flags) / 5.0, 1.0) * 0.08
 
     total_penalty = (
-        vague_penalty +
-        hedging_penalty +
-        specificity_penalty +
-        ai_penalty +
-        clickbait_penalty +
-        subjectivity_penalty +
-        caps_penalty +
-        red_flag_penalty
+        vague_penalty + hedging_penalty + specificity_penalty +
+        ai_penalty + clickbait_penalty + subjectivity_penalty +
+        caps_penalty + red_flag_penalty
     )
 
-    # --- Bonus signals (each increases credibility) ---
-    credibility_bonus = credibility_signal_score * 0.15
+    # --- Bonus signals ---
+    credibility_bonus = credibility_signal_score * 0.12
     specificity_bonus = specificity_score * 0.10
 
-    total_bonus = credibility_bonus + specificity_bonus
+    # Named entity bonus: articles with real named people/places are more credible
+    named_entity_bonus = min(len(entities) / 4.0, 1.0) * 0.10
 
-    # --- Compute final score ---
-    if MODEL_LOADED:
-        # Blend: model (40%) + heuristic assessment (60%)
-        # The heuristic side starts at 0.5 (neutral) and is adjusted
-        heuristic_assessment = 0.5 - total_penalty + total_bonus
-        heuristic_assessment = max(0.0, min(1.0, heuristic_assessment))
-        credibility = model_score * 0.40 + heuristic_assessment * 0.60
+    # Short article leniency: brief news snippets shouldn't be penalized
+    short_article_bonus = max(0, (1.0 - word_count / 100.0)) * 0.08 if word_count < 100 else 0
+
+    total_bonus = credibility_bonus + specificity_bonus + named_entity_bonus + short_article_bonus
+
+    heuristic_assessment = 0.5 - total_penalty + total_bonus
+    heuristic_assessment = max(0.0, min(1.0, heuristic_assessment))
+    heuristic_pct = heuristic_assessment * 100
+
+    # --- Blend Gemini + Heuristics ---
+    if gemini_score is not None:
+        # Gemini (65%) + Heuristics (35%) — Gemini understands context better
+        credibility_pct = round(gemini_score * 0.65 + heuristic_pct * 0.35, 1)
+        model_confidence = 0.85
     else:
-        # Without model: pure heuristic
-        credibility = 0.5 - total_penalty + total_bonus
-        credibility = max(0.0, min(1.0, credibility))
+        credibility_pct = round(heuristic_pct, 1)
+        model_confidence = 0.50
 
-    credibility_pct = round(credibility * 100, 1)
-
-    # Clamp to reasonable range
     credibility_pct = max(5.0, min(95.0, credibility_pct))
 
     # ═══════════════════════════════════════════════════════════════════════
-    # LABEL
+    # LABEL & SUMMARY
     # ═══════════════════════════════════════════════════════════════════════
     if credibility_pct >= 70:
         label = "Likely Real"
@@ -230,33 +243,30 @@ def analyze_text(text: str) -> dict:
     else:
         label = "Likely Fake"
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # SUMMARY
-    # ═══════════════════════════════════════════════════════════════════════
+    # Add Gemini concerns to red flags
+    if gemini_concerns:
+        for concern in gemini_concerns:
+            if concern and concern not in red_flags:
+                red_flags.append(f"🤖 {concern}")
+
+    # Build summary
     summary_parts = []
-    if credibility_pct >= 70:
-        summary_parts.append("This article appears to be credible based on our analysis.")
-    elif credibility_pct >= 40:
-        summary_parts.append("This article shows mixed credibility signals and should be verified with trusted sources.")
+    if gemini_result and gemini_reasoning:
+        summary_parts.append(gemini_reasoning)
     else:
-        summary_parts.append("This article contains multiple indicators of unreliable or fabricated content.")
+        if credibility_pct >= 70:
+            summary_parts.append("This article appears to be credible based on our analysis.")
+        elif credibility_pct >= 40:
+            summary_parts.append("This article shows mixed credibility signals and should be verified.")
+        else:
+            summary_parts.append("This article contains multiple indicators of unreliable or fabricated content.")
 
-    if red_flags:
+    if len(red_flags) > 0:
         summary_parts.append(f"We detected {len(red_flags)} warning signal(s).")
-
-    # Add specific insights to summary
     if vague_score >= 0.5:
         summary_parts.append("The article relies heavily on vague, unnamed sources.")
-    if hedging_score >= 0.5:
-        summary_parts.append("High amount of hedging/uncertainty language reduces verifiability.")
-    if specificity_score < 0.15:
-        summary_parts.append("The article lacks specific verifiable details (names, quotes, data).")
     if ai_score >= 0.5:
         summary_parts.append("Text patterns suggest possible AI-generated content.")
-    if clickbait > 0.5:
-        summary_parts.append("The content uses clickbait-style language.")
-    if credibility_signal_score >= 0.5:
-        summary_parts.append("Article contains credible source attributions.")
 
     return {
         "credibility_score": credibility_pct,

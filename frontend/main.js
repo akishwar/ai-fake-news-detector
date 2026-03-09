@@ -7,7 +7,7 @@ const API_URL = 'http://localhost:8000';
 
 // ── Sample articles for demo ───────────────────────────────────────────────
 const SAMPLES = {
-    real: `Scientists at the World Health Organization (WHO) announced on Monday that a new peer-reviewed study published in The Lancet confirms the effectiveness of the updated COVID-19 vaccine booster. The study, conducted across 15 countries with over 200,000 participants, found that the updated booster reduced hospitalization rates by 72% compared to unvaccinated individuals. Dr. Maria Chen, lead researcher at Johns Hopkins University, noted that "the data is consistent with our earlier findings and provides strong evidence for public health recommendations." The Centers for Disease Control and Prevention (CDC) is expected to update its guidance based on these findings later this week.`,
+    real: `New Delhi, March 7 (Reuters) — India's space agency ISRO successfully launched the PSLV-C58 rocket carrying the XPoSat satellite from the Satish Dhawan Space Centre in Sriharikota on Monday at 9:10 AM IST. The mission, India's first dedicated polarimetry observatory, will study X-ray emissions from black holes and neutron stars over the next five years.\n\n"This is a landmark achievement for Indian astrophysics," said ISRO Chairman S. Somanath during the post-launch press briefing. "The satellite has been placed in a 650 km low-Earth orbit with all systems functioning normally."\n\nThe Rs 250-crore mission was developed in collaboration with the Raman Research Institute in Bangalore. Dr. Varun Bhalerao, principal investigator from IIT Bombay, confirmed that initial telemetry data looks "extremely promising." The European Space Agency congratulated ISRO, calling it "a significant contribution to global space research."`,
     fake: `BREAKING!!! You WON'T BELIEVE what they're hiding from us!! Scientists have EXPOSED a massive government COVERUP about vaccines!! According to sources, Big Pharma has been secretly adding mind-control chips to every vaccine since 2020!! Mainstream media WON'T tell you this but MILLIONS of people are waking up!! Doctors hate this one weird trick that proves vaccines are DANGEROUS!! Share before this gets DELETED!! The truth is being SUPPRESSED by corrupt officials who don't want you to know the REAL statistics!! Many experts believe this is the biggest scandal in HISTORY!!`,
 };
 
@@ -28,6 +28,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initCharCount();
     initButtons();
     initSampleButtons();
+    initFileUpload();
     renderHistory();
 });
 
@@ -127,6 +128,84 @@ function initSampleButtons() {
             articleInput.focus();
         });
     });
+}
+
+// ── File Upload ────────────────────────────────────────────────────────────
+function initFileUpload() {
+    const uploadArea = document.getElementById('uploadArea');
+    const fileInput = document.getElementById('fileInput');
+    const uploadContent = document.getElementById('uploadContent');
+    const uploadProgress = document.getElementById('uploadProgress');
+
+    uploadArea.addEventListener('click', () => fileInput.click());
+
+    uploadArea.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        uploadArea.classList.add('dragover');
+    });
+
+    uploadArea.addEventListener('dragleave', () => {
+        uploadArea.classList.remove('dragover');
+    });
+
+    uploadArea.addEventListener('drop', (e) => {
+        e.preventDefault();
+        uploadArea.classList.remove('dragover');
+        if (e.dataTransfer.files.length > 0) {
+            handleFile(e.dataTransfer.files[0]);
+        }
+    });
+
+    fileInput.addEventListener('change', () => {
+        if (fileInput.files.length > 0) {
+            handleFile(fileInput.files[0]);
+        }
+    });
+
+    async function handleFile(file) {
+        const validTypes = ['application/pdf', 'image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+        if (!validTypes.includes(file.type)) {
+            showToast('Unsupported file type. Please upload a PDF, JPG, or PNG.', 'warning');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        uploadContent.classList.add('hidden');
+        uploadProgress.classList.remove('hidden');
+
+        try {
+            const response = await fetch(`${API_URL}/api/extract-text`, {
+                method: 'POST',
+                body: formData
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.detail || `Server error: ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            // Populate textarea with extracted text
+            articleInput.value = data.text;
+            articleInput.dispatchEvent(new Event('input'));
+
+            showToast(`Successfully extracted text from ${file.name}`, 'success');
+
+            // Auto trigger analysis
+            setTimeout(() => handleAnalyze(), 500);
+
+        } catch (error) {
+            console.error('File extraction failed:', error);
+            showToast(error.message, 'error');
+        } finally {
+            uploadProgress.classList.add('hidden');
+            uploadContent.classList.remove('hidden');
+            fileInput.value = ''; // Reset input
+        }
+    }
 }
 
 // ── Main Analyze Handler ───────────────────────────────────────────────────
